@@ -451,3 +451,128 @@ infrastructure. Then add Redis caching (option 1) for unread count
 specifically, since that is the value read most often. I would only add
 read replica (option 3) if app grow lot more and caching alone is not
 enough anymore.
+
+# Stage 5
+
+## Problems with the given pseudocode
+
+```
+function notify_all(student_ids: array, message: string):
+    for student_id in student_ids:
+        send_email(student_id, message)  # calls Email API
+        save_to_db(student_id, message)  # DB insert
+        push_to_app(student_id, message) # real time push
+```
+
+- It is doing everything **one student at a time, one after another**. For
+  50,000 students, that is 50,000 separate email calls, 50,000 separate DB
+  inserts, and 50,000 separate pushes, all in a simple loop. This will take
+  very long time to finish, specially since email API call over network is
+  slow.
+- `send_email` is a slow, unreliable external call, but it is blocking the
+  rest of the loop for that student. If email API is a bit slow for one
+  student, everyone after them also has to wait.
+- There is no error handling shown at all. If `send_email` fail for a
+  student, we don't know if `save_to_db` and `push_to_app` still run for
+  that student or not, and we don't know which students actually failed.
+- No retry. If email fail, it is just lost, nobody tries again.
+- If the whole function crash in the middle (server restart, etc), there
+  is no way to know which students already got notified and which one did
+  not, so we cannot safely resume without risk of double sending.
+- Doing 50,000 separate DB inserts is also slow, one bulk insert would be
+  much faster than looping insert one by one.
+
+## Logs show send_email failed for 200 students, what now?
+
+Since we don't have retry logic in the original code, right now we cannot
+tell easily what to do next except manually check logs and resend to just
+those 200 - which is risky and slow to do by hand, and if we just rerun
+the whole `notify_all` again, all 49,800 students who already succeeded
+will get **duplicate** email and duplicate notification. That's a big
+problem with this design.
+
+In the redesign below, this is solved by keeping a track of each email job
+and its status, so failed ones can retry on their own, and successful ones
+never get resent.
+
+## Should saving to DB and sending email happen together?
+
+No, I don't think so. Reasons:
+
+- DB insert is something we control, it is fast and mostly always work.
+  Email API is external and slower and can fail for reasons out of our
+  control (rate limit, invalid email, provider down, etc).
+- If we tie both together, then one slow/broken email means the DB write
+  and in-app notification also get delayed or blocked, even though nothing
+  is wrong with our own database.
+- The notification's "source of truth" should be the DB and the in-app
+  push, since those are fast and reliable. Email is just an extra way of
+  informing the student, and it should be allowed to fail and retry on its
+  own schedule without affecting the main notification.
+
+So I would save to DB first (fast, reliable, one bulk operation for all
+students), and treat sending email as a separate background job that runs
+independently and can retry without touching the DB step again.
+
+## Redesigned pseudocode
+
+```
+function notify_all(student_ids: array, message: string):
+    # 1. build all notification rows first
+    notifications = []
+    for student_id in student_ids:
+        notifications.push({
+            studentID: student_id,
+            title: "Placement Update",
+            message: message,
+            type: "info",
+            notificationType: "Placement"
+        })
+
+    # 2. one single bulk insert instead of 50,000 separate inserts
+    bulk_insert_to_db(notifications)
+
+    # 3. push to app right away using the real time mechanism from Stage 1
+    # this is fire and forget - if a student is offline, they will still
+    # see the notification next time they open the app since it is in DB
+    for student_id in student_ids:
+        push_to_app(student_id, message)
+
+    # 4. don't send email here directly, just queue a job for each student
+    for student_id in student_ids:
+        queue_email_job({ student_id: student_id, message: message, retry_count: 0 })
+
+
+# separate worker, runs on its own, keeps pulling jobs from the queue
+function email_worker():
+    while true:
+        job = get_next_job_from_queue()
+        if job is null:
+            continue
+
+        try:
+            send_email(job.student_id, job.message)
+            mark_job_done(job)
+        catch error:
+            if job.retry_count < 3:
+                requeue_job(job, retry_count = job.retry_count + 1)  # retry with backoff
+            else:
+                mark_job_failed(job)  # move to a "failed jobs" table for later check
+```
+
+## Why this is better
+
+- DB save is now one bulk insert, much faster than 50,000 separate ones.
+- In-app push and DB save happen quickly for everyone, not blocked by slow
+  email calls.
+- Email sending is moved to a queue with a worker (or multiple workers
+  running in parallel to go faster), so one slow/failed email doesn't hold
+  up anybody else.
+- Each email job automatically retries up to 3 times on its own. If it
+  still fails after that (like the 200 students case), it goes to a
+  "failed jobs" table instead of just disappearing, so we can see exactly
+  who didn't get their email and try again later, without resending to
+  the students who already got it.
+- If the whole process restarts, only pending/failed jobs still in the
+  queue get retried, nothing gets duplicated for students already marked
+  done.
