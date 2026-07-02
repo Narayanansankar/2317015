@@ -216,8 +216,8 @@ CREATE TABLE notifications (
   studentID         BIGINT NOT NULL,
   title             VARCHAR(255) NOT NULL,
   message           TEXT NOT NULL,
-  type              VARCHAR(20) NOT NULL,        -- info, success, warning, error (for UI icon/color)
-  notificationType  VARCHAR(20) NOT NULL,        -- Event, Result, Placement (for filtering)
+  type              VARCHAR(20) NOT NULL,        -- info, success, warning, error 
+  notificationType  VARCHAR(20) NOT NULL,        -- Event, Result, Placement 
   link              VARCHAR(255),
   isRead            BOOLEAN NOT NULL DEFAULT false,
   createdAt         TIMESTAMP NOT NULL DEFAULT now()
@@ -312,7 +312,7 @@ DELETE FROM notifications
 WHERE id = 501 AND studentID = 1042;
 ```
 
-**Insert a new notification (used internally, e.g. when a new placement update happens)**
+**Insert a new notification e.g. when a new placement update happens**
 
 ```sql
 INSERT INTO notifications (studentID, title, message, type, notificationType, link)
