@@ -318,3 +318,80 @@ WHERE id = 501 AND studentID = 1042;
 INSERT INTO notifications (studentID, title, message, type, notificationType, link)
 VALUES (1042, 'New Placement Drive', 'TCS is visiting campus on 10th July', 'info', 'Placement', '/placements/10');
 ```
+
+# Stage 3
+
+## Is the given query accurate?
+
+```sql
+SELECT * FROM notifications
+WHERE studentID = 1042 AND isRead = false
+ORDER BY createdAt ASC;
+```
+
+Yes, it is accurate. It correctly reads all the unread notifications for
+student 1042, ordered from oldest to newest. So the logic is right but the
+problem is just speed.
+
+## Why is it slow?
+
+With 5,000,000 notifications and no index on `studentID` or `isRead`, the
+database cannot jump directly to student 1042's rows. It has to check every
+single row in the table one by one to see if `studentID = 1042 AND isRead =
+false`. That is a full table scan over 5 million rows for a single request.
+
+After that, it also has to sort all the matching rows by `createdAt`, which
+takes extra time if there's no index to help with the ordering too.
+
+Also `SELECT *` fetches every column, including the long `message` text,
+even though the frontend maybe doesn't need all of it right away.
+
+**Likely cost:** roughly O(n) where n = 5,000,000 so it's very slow
+
+## What I would change
+
+- Add a composite index on `(studentID, isRead, createdAt)`. It lets the
+  database jump straight to this student's unread rows, close to
+  sorted order, instead of scanning the whole table.
+- Select only the columns actually needed instead of `SELECT *`.
+- Add a `LIMIT` since a student could have hundreds of unread notifications
+  and the frontend doesn't need all of them in one screen.
+
+```sql
+SELECT id, title, message, type, notificationType, link, isRead, createdAt
+FROM notifications
+WHERE studentID = 1042 AND isRead = false
+ORDER BY createdAt ASC
+LIMIT 20;
+```
+
+## Is "add index on every column" good advice?
+
+No, not really. Reasons:
+
+- Every index you add makes `INSERT`/`UPDATE`/`DELETE` slower, because the
+  database has to update all those indexes too, not just the table. 
+- Indexes also take up extra storage, one index per column adds up fast
+  on a 5 million row table.
+- Columns like `message` (long text) are not even useful to index for this
+  kind of query, and are not great candidates for a normal index anyway.
+- A single well-chosen composite index (like `studentID, isRead, createdAt`
+  together) is much more useful than separate indexes on every column,
+  because it matches exactly how the query filters and sorts data.
+
+So instead of indexing everything, it's better to only index the columns
+that are actually used in `WHERE` and `ORDER BY`, and combine them into one
+index when they're used together.
+
+## Query to find students with a placement notification in the last 7 days
+
+```sql
+SELECT DISTINCT studentID
+FROM notifications
+WHERE notificationType = 'Placement'
+  AND createdAt >= NOW() - INTERVAL '7 days';
+```
+
+This gets every student who received at least one `Placement` type
+notification in the last 7 days, without repeating the same student more
+than once.
