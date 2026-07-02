@@ -1,7 +1,16 @@
 import axios from "axios";
-import dotenv from "dotenv";
-dotenv.config();
+
 const LOG_API_URL = "http://4.224.186.213/evaluation-service/logs";
+
+// token is set once at app startup with setLogToken(), instead of reading
+// process.env directly here - this way this file works in both a node
+// backend and a browser frontend (browser doesn't have process.env/dotenv)
+let accessToken = "";
+
+export function setLogToken(token: string) {
+  accessToken = token;
+}
+
 export type LogStack = "backend" | "frontend";
 export type LogLevel = "debug" | "info" | "warn" | "error" | "fatal";
 export type LogPackage =
@@ -23,6 +32,7 @@ export type LogPackage =
   | "config"
   | "middleware"
   | "utils";
+
 export async function Log(
   stack: LogStack,
   level: LogLevel,
@@ -40,7 +50,7 @@ export async function Log(
       },
       {
         headers: {
-          Authorization: `Bearer ${process.env.LOG_ACCESS_TOKEN}`,
+          Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
         },
       }
